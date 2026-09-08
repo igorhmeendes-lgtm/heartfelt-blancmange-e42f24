@@ -39,21 +39,34 @@ e cruza com o índice mestre.
 
 ## Regras de negócio implementadas
 
-- **Par/ímpar pelo endereço**: o app lê o número entre parênteses do
-  endereço (`R01-(2)-1A` → vão `2`). Par = alto fluxo; ímpar = baixo fluxo.
-- **Classificação de giro**: curva ABC por volume vendido nos últimos 3
-  meses — Alto (até 80% do volume acumulado), Médio (até 95%), Baixo
-  (restante com venda), Sem saída (zero venda no período).
+- **Par/ímpar pelo endereço**: o app lê o número do meio do endereço
+  agrupado — aceita tanto `R01-2-1A` (formato mais comum: estação-rack
+  concatenados só com hífen, sem parênteses) quanto `R01-(2)-1A`. Vão par =
+  alto fluxo; vão ímpar = baixo fluxo. Validado contra uma base real: as
+  posições PAR têm ~7x mais saída média por posição que as ÍMPAR.
+- **Classificação de giro**: curva ABC pela quantidade de **saída** do
+  estoque nos últimos 3 meses (não pela entrada) — Alto (até 80% do volume
+  acumulado), Médio (até 95%), Baixo (restante com saída), Sem saída (zero
+  saída no período). Se a planilha de "Vendas" for na verdade um razão de
+  movimentação (com colunas do tipo `QtdeEntrada`/`QtdeSaida`), o app nunca
+  deixa a entrada ser confundida com a saída ao auto-detectar a coluna.
 - **Recomendação**: Alto fluxo fora da PAR → sugere mover para PAR. Baixo
   fluxo/sem saída dentro da PAR → sugere mover para ÍMPAR. Médio fluxo é
   neutro (não força troca).
-- **Slot candidato**: prioriza endereços livres cadastrados manualmente;
-  se não houver, usa um endereço hoje ocupado por um SKU com saldo zerado
-  (Físico e Disponível = 0) — na conferência de NF, só considera "zerado
-  liberável" o SKU que **não** veio na nota atual.
+- **Slot candidato**: prioriza posições livres — detectadas automaticamente
+  quando a planilha de Endereçamento já tem linhas com o código do material
+  em branco, mais qualquer endereço extra que você cadastrar manualmente.
+  Se não houver livre, usa um endereço hoje ocupado por um SKU com saldo
+  zerado (Físico e Disponível = 0) — na conferência de NF, só considera
+  "zerado liberável" o SKU que **não** veio na nota atual.
+- **Período das vendas**: se a coluna de data for mapeada, o app calcula o
+  intervalo real dos dados carregados e avisa se for bem menor que ~3 meses
+  (sinal comum de exportação cortada no limite de linhas da planilha).
 - **Números/valores**: qualquer valor nulo, vazio ou não numérico é tratado
   como `0` (nunca quebra a tela com erro). Números em formato BR
-  (`1.234,56`, `R$ 1.234,56`) são reconhecidos.
+  (`1.234,56`, `R$ 1.234,56`) e em formato com ponto decimal (`0.01`) são
+  reconhecidos. Saldo negativo real (backorder) é preservado — não é
+  zerado, porque é sinal de um problema real de estoque.
 
 ## Guia de implementação / deploy
 

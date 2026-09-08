@@ -16,8 +16,12 @@
 
   const STORAGE_PREFIX = 'sep_v1_';
 
+  // Normaliza cabeçalho pra comparação: separa camelCase ("CodMaterial" ->
+  // "Cod Material", "QtdeSaida" -> "Qtde Saida" — comum em exports crus),
+  // remove acentos e pontuação, tudo minúsculo.
   const norm = (s) =>
     String(s ?? '')
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
       .normalize('NFD')
       .replace(/[̀-ͯ]/g, '')
       .toLowerCase()
@@ -74,17 +78,41 @@
     return Math.random().toString(36).slice(2, 10);
   }
 
-  // "R01-(2)-1A" -> { enderecoCompleto, rack:'R01', vao:2, paridade:'par', nivel:'1A' }
+  // Extrai o "vão" (número que define par/ímpar) de um endereço agrupado.
+  // Aceita tanto "R01-(2)-1A" (com parênteses) quanto "R01-2-1A" (sem —
+  // formato mais comum quando o próprio sistema já concatena as colunas
+  // Estação-Rack-Nível com hífen).
   function parseEndereco(raw) {
     const s = String(raw ?? '').trim();
     if (!s) return null;
-    const m = s.match(/\(([0-9]+)\)/);
-    const vao = m ? parseInt(m[1], 10) : null;
-    const paridade = vao === null ? 'indefinida' : (vao % 2 === 0 ? 'par' : 'impar');
     const partes = s.split('-').map((p) => p.trim()).filter(Boolean);
+    let vao = null;
+    const mParen = s.match(/\(([0-9]+)\)/);
+    if (mParen) {
+      vao = parseInt(mParen[1], 10);
+    } else {
+      // sem parênteses: usa o primeiro segmento 100% numérico entre hifens
+      // que não seja o próprio primeiro token (estação/rack, ex. "R01")
+      for (let i = 1; i < partes.length; i++) {
+        if (/^[0-9]+$/.test(partes[i])) { vao = parseInt(partes[i], 10); break; }
+      }
+    }
+    const paridade = vao === null ? 'indefinida' : (vao % 2 === 0 ? 'par' : 'impar');
     const rack = partes[0] || '';
     const nivel = partes.length > 1 ? partes[partes.length - 1] : '';
     return { enderecoCompleto: s, rack, vao, paridade, nivel };
+  }
+
+  // "01/06/2026 09:13:42" ou "01/06/2026" -> Date. Qualquer coisa não
+  // reconhecível volta null (não quebra a agregação).
+  function parseDateBR(v) {
+    if (!v) return null;
+    if (v instanceof Date) return isNaN(v.getTime()) ? null : v;
+    const s = String(v).trim();
+    const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (m) return new Date(+m[3], +m[2] - 1, +m[1]);
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? null : d;
   }
 
   /* ---------------------------------------------------------------------
@@ -151,14 +179,22 @@
     fisico: ['total fisico', 'fisico', 'estoque fisico', 'saldo fisico'],
     alocado: ['total alocado', 'alocado', 'saldo alocado'],
     disponivel: ['total disponivel', 'disponivel', 'saldo disponivel'],
-    enderecoCompleto: ['endereco agrupado', 'endereco completo', 'endereco linha', 'endereco separacao', 'localizacao', 'endereco'],
-    quantidade: ['quantidade vendida', 'qtd vendida', 'quantidade', 'qtde vendida', 'qtd', 'qtde', 'unidades vendidas', 'unidades'],
-    data: ['data venda', 'dt venda', 'data emissao', 'periodo', 'mes referencia', 'data'],
+    enderecoCompleto: ['end agrupado', 'endereco agrupado', 'endereco completo', 'endereco linha', 'endereco separacao', 'localizacao', 'endereco'],
+    // "quantidade" aqui é sempre a SAÍDA (o que efetivamente saiu do
+    // estoque/da posição) — nunca a entrada. Ver guarda em autoDetect().
+    quantidade: ['qtde saida', 'qtd saida', 'quantidade saida', 'saida vendida', 'quantidade vendida', 'qtd vendida', 'qtde vendida', 'saida'],
+    data: ['data hora movimento', 'data venda', 'dt venda', 'data emissao', 'periodo', 'mes referencia', 'data'],
   };
 
   function autoDetect(headers, field) {
     const syns = SYNONYMS[field] || [];
-    const normed = headers.map((h) => ({ h, n: norm(h) }));
+    let candidatos = headers;
+    if (field === 'quantidade') {
+      // planilhas de movimento cru costumam ter QtdeEntrada e QtdeSaida
+      // lado a lado — nunca deixa a entrada ser confundida com a saída.
+      candidatos = headers.filter((h) => !norm(h).includes('entrada'));
+    }
+    const normed = candidatos.map((h) => ({ h, n: norm(h) }));
     for (const syn of syns) {
       const exact = normed.find((x) => x.n === syn);
       if (exact) return exact.h;
@@ -223,8 +259,8 @@
     alocado: 'Total - Alocado',
     disponivel: 'Total - Disponível *',
     enderecoCompleto: 'Endereço completo (já agrupado) *',
-    quantidade: 'Quantidade Vendida *',
-    data: 'Data da Venda (opcional)',
+    quantidade: 'Quantidade de Saída (o que saiu do estoque) *',
+    data: 'Data do Movimento (opcional, calcula o período)',
   };
 
   const SOURCE_FIELDS = {
@@ -255,18 +291,22 @@
     })).filter((r) => r.codigo);
   }
 
+  // Mantém as linhas SEM código (posições vagas — muito comum a planilha
+  // de endereçamento já listar essas posições com "Código Material" em
+  // branco): quem chama decide se trata como ocupada ou como slot livre.
   function aplicarMapeamentoEndereco(rows, map) {
     return rows.map((r) => {
       const parsed = parseEndereco(r[map.enderecoCompleto]);
+      if (!parsed) return null;
       return {
         codigo: normalizeCode(r[map.codigo]),
-        enderecoCompleto: parsed ? parsed.enderecoCompleto : '',
-        rack: parsed ? parsed.rack : '',
-        vao: parsed ? parsed.vao : null,
-        paridade: parsed ? parsed.paridade : 'indefinida',
-        nivel: parsed ? parsed.nivel : '',
+        enderecoCompleto: parsed.enderecoCompleto,
+        rack: parsed.rack,
+        vao: parsed.vao,
+        paridade: parsed.paridade,
+        nivel: parsed.nivel,
       };
-    }).filter((r) => r.codigo && r.enderecoCompleto);
+    }).filter(Boolean);
   }
 
   // Agrega vendas por código (mesma peça pode aparecer várias vezes nas
@@ -283,10 +323,27 @@
     return Array.from(acc.entries()).map(([codigo, qtd3m]) => ({ codigo, qtd3m }));
   }
 
+  // Menor/maior data encontrada nas linhas mapeadas — usado só pra avisar
+  // o usuário se o período carregado é mais curto do que os "3 meses"
+  // esperados (ex.: export cru cortado no limite de linhas da planilha).
+  function calcularPeriodoVendas(rowsPorGrupo) {
+    let min = null;
+    let max = null;
+    rowsPorGrupo.forEach((rows) => rows.forEach((r) => {
+      if (!r.data) return;
+      if (!min || r.data < min) min = r.data;
+      if (!max || r.data > max) max = r.data;
+    }));
+    if (!min || !max) return null;
+    const dias = Math.round((max - min) / 86400000) + 1;
+    return { min: min.toISOString(), max: max.toISOString(), dias };
+  }
+
   function aplicarMapeamentoVendas(rows, map) {
     return rows.map((r) => ({
       codigo: normalizeCode(r[map.codigo]),
       quantidade: parseNumberBR(r[map.quantidade]),
+      data: map.data ? parseDateBR(r[map.data]) : null,
     })).filter((r) => r.codigo);
   }
 
@@ -893,10 +950,28 @@
   /* ---- 7.5 Dados (importação + mapeamento + configuração) ---- */
   function renderDados() {
     const el = $('[data-view="dados"]');
+
+    let periodoInfo = '';
+    if (DB.meta.vendasPeriodo) {
+      const { min, max, dias } = DB.meta.vendasPeriodo;
+      const fmt = (iso) => new Date(iso).toLocaleDateString('pt-BR');
+      const curto = dias < 80;
+      periodoInfo = `<div class="mt-2 text-xs ${curto ? 'text-amber-600 dark:text-amber-400' : 'text-slate-400'}">
+        Período detectado: ${fmt(min)} a ${fmt(max)} (${dias} dias)${curto ? ' ⚠️ menos que ~3 meses — confira se a exportação não veio cortada (ex.: limite de linhas da planilha).' : ''}
+      </div>`;
+    }
+    let enderecoInfo = '';
+    if (DB.endereco.length) {
+      const partes = [];
+      if (DB.meta.enderecoLivresDetectados) partes.push(`${formatNum(DB.meta.enderecoLivresDetectados)} posição(ões) vaga(s) detectada(s) na própria planilha (linhas sem código)`);
+      if (DB.meta.enderecoDuplicados) partes.push(`${formatNum(DB.meta.enderecoDuplicados)} código(s) com mais de um endereço (usamos o último encontrado)`);
+      if (partes.length) enderecoInfo = `<div class="mt-2 text-xs text-slate-400">${partes.join(' · ')}</div>`;
+    }
+
     const sources = [
-      { key: 'estoque', label: 'Saldo de Estoque', count: DB.estoque.length, hint: 'Código, Nome, Preços e Totais Físico/Alocado/Disponível' },
-      { key: 'endereco', label: 'Endereçamento', count: DB.endereco.length, hint: 'Código + coluna de endereço já agrupado (ex: R01-(2)-1A)' },
-      { key: 'vendas', label: 'Vendas (últimos 3 meses)', count: DB.vendas.length, hint: 'Pode ter várias abas; itens repetidos são somados automaticamente' },
+      { key: 'estoque', label: 'Saldo de Estoque', count: DB.estoque.length, hint: 'Código, Nome, Preços e Totais Físico/Alocado/Disponível', extra: '' },
+      { key: 'endereco', label: 'Endereçamento', count: DB.endereco.length, hint: 'Código + coluna de endereço já agrupado (ex: R01-2-1A)', extra: enderecoInfo },
+      { key: 'vendas', label: 'Vendas / Movimentos (últimos 3 meses)', count: DB.vendas.length, hint: 'Some a coluna de quantidade de SAÍDA; pode ter várias abas — itens repetidos são somados automaticamente', extra: periodoInfo },
     ];
     el.innerHTML = `
       <div class="space-y-6">
@@ -919,6 +994,7 @@
                 ${s.count ? `<button data-clear="${s.key}" class="text-xs text-rose-500 hover:underline">limpar</button>` : ''}
               </div>
             </div>
+            ${s.extra}
             <label class="mt-3 flex items-center justify-center gap-2 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl p-4 text-sm text-slate-500 dark:text-slate-400 cursor-pointer hover:border-indigo-400">
               <span>📂 Selecionar arquivo (.xlsx / .csv)</span>
               <input type="file" data-upload="${s.key}" accept=".xlsx,.xls,.csv" class="hidden">
@@ -929,8 +1005,8 @@
 
         <div class="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 sm:p-5">
           <div class="font-medium text-slate-900 dark:text-slate-100 mb-1">Endereços livres conhecidos</div>
-          <p class="text-xs text-slate-400 mb-2">A planilha de endereçamento geralmente só lista posições ocupadas. Cole aqui, um por linha, endereços vagos que você já sabe (ex: R02-(4)-3B) para o app poder sugerir esses lugares.</p>
-          <textarea id="textarea-livres" rows="4" class="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 p-3 text-sm font-mono" placeholder="R02-(4)-3B\nR05-(6)-2C">${DB.slotsLivres.join('\n')}</textarea>
+          <p class="text-xs text-slate-400 mb-2">Posições sem código na planilha de Endereçamento já entram aqui automaticamente. Se souber de mais alguma vaga que a planilha não mostra, cole abaixo (um endereço por linha).</p>
+          <textarea id="textarea-livres" rows="4" class="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 p-3 text-sm font-mono" placeholder="R02-4-3B\nR05-6-2C">${DB.slotsLivres.join('\n')}</textarea>
           <button data-action="salvar-livres" class="mt-2 px-3 py-2 rounded-xl text-sm font-medium bg-indigo-600 hover:bg-indigo-500 text-white">Salvar lista</button>
         </div>
 
@@ -1054,22 +1130,31 @@
       if (erro) { feedback.textContent = erro; return; }
       feedback.textContent = '';
 
-      mapeamentosPorGrupo.forEach(({ grupo }) => {
-        // salva o mapeamento pra próxima vez que aparecer esse mesmo layout de cabeçalho
-      });
-
       if (sourceKey === 'estoque') {
         const rows = mapeamentosPorGrupo.flatMap(({ grupo, mapa }) =>
           grupo.sheetNames.flatMap((name) => aplicarMapeamentoEstoque(wb.sheets[name].rows, mapa)));
         DB.estoque = rows;
       } else if (sourceKey === 'endereco') {
-        const rows = mapeamentosPorGrupo.flatMap(({ grupo, mapa }) =>
+        const todasLinhas = mapeamentosPorGrupo.flatMap(({ grupo, mapa }) =>
           grupo.sheetNames.flatMap((name) => aplicarMapeamentoEndereco(wb.sheets[name].rows, mapa)));
-        DB.endereco = rows;
+        // linhas com código = posição ocupada; sem código = posição vaga
+        // (muitas planilhas de endereçamento já listam essas posições).
+        const ocupadas = todasLinhas.filter((r) => r.codigo);
+        const livresDaPlanilha = todasLinhas.filter((r) => !r.codigo).map((r) => r.enderecoCompleto);
+        DB.endereco = ocupadas;
+        const ocupadosSet = new Set(ocupadas.map((r) => r.enderecoCompleto));
+        const livresSet = new Set([...DB.slotsLivres, ...livresDaPlanilha]);
+        ocupadosSet.forEach((e) => livresSet.delete(e)); // se voltou a ser ocupada, sai da lista de livres
+        DB.slotsLivres = Array.from(livresSet);
+        const contagemPorCodigo = new Map();
+        ocupadas.forEach((r) => contagemPorCodigo.set(r.codigo, (contagemPorCodigo.get(r.codigo) || 0) + 1));
+        DB.meta.enderecoDuplicados = Array.from(contagemPorCodigo.values()).filter((v) => v > 1).length;
+        DB.meta.enderecoLivresDetectados = livresDaPlanilha.length;
       } else if (sourceKey === 'vendas') {
         const rowsPorGrupo = mapeamentosPorGrupo.map(({ grupo, mapa }) =>
           grupo.sheetNames.flatMap((name) => aplicarMapeamentoVendas(wb.sheets[name].rows, mapa)));
         DB.vendas = agregarVendas(rowsPorGrupo);
+        DB.meta.vendasPeriodo = calcularPeriodoVendas(rowsPorGrupo);
       }
 
       mapeamentosPorGrupo.forEach(({ grupo, mapa }) => { DB.mapeamentos[grupo.sig] = mapa; });
