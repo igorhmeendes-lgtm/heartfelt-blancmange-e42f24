@@ -149,7 +149,10 @@
   const DB = {
     estoque: Store.get('estoque', []),     // [{codigo, nome, custo, reposicao, padrao, fisico, alocado, disponivel}]
     endereco: Store.get('endereco', []),   // [{codigo, enderecoCompleto, rack, vao, paridade, nivel}]
-    vendas: Store.get('vendas', []),       // [{codigo, qtd3m}]
+    // Vendas é importada em LOTES (um por arquivo/mês importado) e somada
+    // entre eles — assim dá pra ir juntando os meses conforme forem sendo
+    // exportados, sem perder o que já foi carregado antes.
+    vendasLotes: Store.get('vendasLotes', []), // [{id, nomeArquivo, importadoEm, periodo, porCodigo:{codigo:qtd}}]
     slotsLivres: Store.get('slotsLivres', []), // ["R01-(3)-2B", ...]
     mapeamentos: Store.get('mapeamentos', {}), // assinatura de cabeçalho -> mapeamento salvo
     meta: Store.get('meta', {}),           // {estoqueAt, enderecoAt, vendasAt}
@@ -159,11 +162,39 @@
   function persist() {
     Store.set('estoque', DB.estoque);
     Store.set('endereco', DB.endereco);
-    Store.set('vendas', DB.vendas);
+    Store.set('vendasLotes', DB.vendasLotes);
     Store.set('slotsLivres', DB.slotsLivres);
     Store.set('mapeamentos', DB.mapeamentos);
     Store.set('meta', DB.meta);
     Store.set('ultimaConferenciaNF', DB.ultimaConferenciaNF);
+  }
+
+  // Soma todos os lotes de vendas já importados, código por código.
+  function vendasAgregadas() {
+    const acc = new Map();
+    DB.vendasLotes.forEach((lote) => {
+      Object.entries(lote.porCodigo).forEach(([codigo, qtd]) => {
+        acc.set(codigo, (acc.get(codigo) || 0) + qtd);
+      });
+    });
+    return Array.from(acc.entries()).map(([codigo, qtd3m]) => ({ codigo, qtd3m }));
+  }
+
+  // Período coberto pela soma de todos os lotes (do início do lote mais
+  // antigo ao fim do mais recente) — usado pro aviso de "menos que 3 meses".
+  function vendasPeriodoGlobal() {
+    let min = null;
+    let max = null;
+    DB.vendasLotes.forEach((lote) => {
+      if (!lote.periodo) return;
+      const lmin = new Date(lote.periodo.min);
+      const lmax = new Date(lote.periodo.max);
+      if (!min || lmin < min) min = lmin;
+      if (!max || lmax > max) max = lmax;
+    });
+    if (!min || !max) return null;
+    const dias = Math.round((max - min) / 86400000) + 1;
+    return { min: min.toISOString(), max: max.toISOString(), dias };
   }
 
   /* ---------------------------------------------------------------------
@@ -407,7 +438,7 @@
       const o = ensure(e.codigo);
       o.endereco = { enderecoCompleto: e.enderecoCompleto, rack: e.rack, vao: e.vao, paridade: e.paridade, nivel: e.nivel };
     });
-    const giro = classificarGiro(DB.vendas);
+    const giro = classificarGiro(vendasAgregadas());
     giro.forEach((info, codigo) => { ensure(codigo).vendas = info; });
     return map;
   }
@@ -603,7 +634,7 @@
         valorOportunidade += Math.max(i.disponivel, 0) * i.padrao;
       }
     });
-    const semEndFlag = DB.endereco.length === 0 || DB.estoque.length === 0 || DB.vendas.length === 0;
+    const semEndFlag = DB.endereco.length === 0 || DB.estoque.length === 0 || DB.vendasLotes.length === 0;
     const ultimaNF = DB.ultimaConferenciaNF;
     const semEndNF = ultimaNF ? ultimaNF.linhas.filter((l) => l.status === 'sem_endereco').length : 0;
 
@@ -951,15 +982,6 @@
   function renderDados() {
     const el = $('[data-view="dados"]');
 
-    let periodoInfo = '';
-    if (DB.meta.vendasPeriodo) {
-      const { min, max, dias } = DB.meta.vendasPeriodo;
-      const fmt = (iso) => new Date(iso).toLocaleDateString('pt-BR');
-      const curto = dias < 80;
-      periodoInfo = `<div class="mt-2 text-xs ${curto ? 'text-amber-600 dark:text-amber-400' : 'text-slate-400'}">
-        Período detectado: ${fmt(min)} a ${fmt(max)} (${dias} dias)${curto ? ' ⚠️ menos que ~3 meses — confira se a exportação não veio cortada (ex.: limite de linhas da planilha).' : ''}
-      </div>`;
-    }
     let enderecoInfo = '';
     if (DB.endereco.length) {
       const partes = [];
@@ -971,8 +993,16 @@
     const sources = [
       { key: 'estoque', label: 'Saldo de Estoque', count: DB.estoque.length, hint: 'Código, Nome, Preços e Totais Físico/Alocado/Disponível', extra: '' },
       { key: 'endereco', label: 'Endereçamento', count: DB.endereco.length, hint: 'Código + coluna de endereço já agrupado (ex: R01-2-1A)', extra: enderecoInfo },
-      { key: 'vendas', label: 'Vendas / Movimentos (últimos 3 meses)', count: DB.vendas.length, hint: 'Some a coluna de quantidade de SAÍDA; pode ter várias abas — itens repetidos são somados automaticamente', extra: periodoInfo },
     ];
+
+    const totalVendasSKUs = vendasAgregadas().length;
+    const periodoGlobal = vendasPeriodoGlobal();
+    const fmtData = (iso) => new Date(iso).toLocaleDateString('pt-BR');
+    const periodoGlobalInfo = periodoGlobal ? `
+      <div class="mt-2 text-xs ${periodoGlobal.dias < 80 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-400'}">
+        Período total coberto pelos lotes: ${fmtData(periodoGlobal.min)} a ${fmtData(periodoGlobal.max)} (${periodoGlobal.dias} dias)${periodoGlobal.dias < 80 ? ' ⚠️ menos que ~3 meses — importe mais lotes ou confira se algum export veio cortado.' : ''}
+      </div>` : '';
+
     el.innerHTML = `
       <div class="space-y-6">
         <div>
@@ -1004,6 +1034,41 @@
         `).join('')}
 
         <div class="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 sm:p-5">
+          <div class="flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <div class="font-medium text-slate-900 dark:text-slate-100">Vendas / Movimentos (últimos 3 meses)</div>
+              <div class="text-xs text-slate-400">Some a coluna de quantidade de SAÍDA. Importe um arquivo por mês/lote — cada um <strong>soma</strong> aos anteriores, não substitui.</div>
+            </div>
+            <span class="text-xs px-2 py-1 rounded-full font-medium ${DB.vendasLotes.length ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400' : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}">
+              ${DB.vendasLotes.length ? `${formatNum(DB.vendasLotes.length)} lote(s) · ${formatNum(totalVendasSKUs)} SKUs` : 'vazio'}
+            </span>
+          </div>
+          ${periodoGlobalInfo}
+          ${DB.vendasLotes.length ? `
+            <ul class="mt-3 space-y-1.5">
+              ${DB.vendasLotes.map((lote) => {
+                const skusNoLote = Object.keys(lote.porCodigo).length;
+                const unidadesNoLote = Object.values(lote.porCodigo).reduce((a, b) => a + b, 0);
+                const periodoTxt = lote.periodo ? `${fmtData(lote.periodo.min)} a ${fmtData(lote.periodo.max)}` : 'período não detectado';
+                return `
+                  <li class="flex items-center justify-between gap-2 text-xs bg-slate-50 dark:bg-slate-800/60 rounded-lg px-3 py-2">
+                    <div class="min-w-0">
+                      <div class="font-medium text-slate-700 dark:text-slate-300 truncate">${escapeHtml(lote.nomeArquivo)}</div>
+                      <div class="text-slate-400">${periodoTxt} · ${formatNum(skusNoLote)} SKUs · ${formatNum(unidadesNoLote)} un.</div>
+                    </div>
+                    <button data-remove-lote="${lote.id}" class="text-rose-500 hover:underline whitespace-nowrap">remover</button>
+                  </li>`;
+              }).join('')}
+            </ul>
+          ` : ''}
+          <label class="mt-3 flex items-center justify-center gap-2 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl p-4 text-sm text-slate-500 dark:text-slate-400 cursor-pointer hover:border-indigo-400">
+            <span>📂 Adicionar lote de vendas (.xlsx / .csv)</span>
+            <input type="file" data-upload="vendas" accept=".xlsx,.xls,.csv" class="hidden">
+          </label>
+          <div data-mapping-area="vendas" class="mt-2"></div>
+        </div>
+
+        <div class="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 sm:p-5">
           <div class="font-medium text-slate-900 dark:text-slate-100 mb-1">Endereços livres conhecidos</div>
           <p class="text-xs text-slate-400 mb-2">Posições sem código na planilha de Endereçamento já entram aqui automaticamente. Se souber de mais alguma vaga que a planilha não mostra, cole abaixo (um endereço por linha).</p>
           <textarea id="textarea-livres" rows="4" class="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 p-3 text-sm font-mono" placeholder="R02-4-3B\nR05-6-2C">${DB.slotsLivres.join('\n')}</textarea>
@@ -1031,6 +1096,18 @@
       });
     });
 
+    $('input[data-upload="vendas"]', el).addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) iniciarImportacao('vendas', file);
+    });
+    $$('[data-remove-lote]', el).forEach((btn) => {
+      btn.addEventListener('click', () => {
+        DB.vendasLotes = DB.vendasLotes.filter((l) => l.id !== btn.dataset.removeLote);
+        persist();
+        renderDados();
+      });
+    });
+
     $('[data-action="salvar-livres"]', el).addEventListener('click', () => {
       const raw = $('#textarea-livres', el).value;
       DB.slotsLivres = raw.split('\n').map((s) => s.trim()).filter(Boolean);
@@ -1040,8 +1117,8 @@
 
     $('[data-action="reset-app"]', el).addEventListener('click', () => {
       if (!confirm('Isso vai apagar todos os dados importados neste aparelho. Continuar?')) return;
-      ['estoque', 'endereco', 'vendas', 'slotsLivres', 'mapeamentos', 'meta', 'ultimaConferenciaNF'].forEach((k) => Store.remove(k));
-      DB.estoque = []; DB.endereco = []; DB.vendas = []; DB.slotsLivres = [];
+      ['estoque', 'endereco', 'vendasLotes', 'slotsLivres', 'mapeamentos', 'meta', 'ultimaConferenciaNF'].forEach((k) => Store.remove(k));
+      DB.estoque = []; DB.endereco = []; DB.vendasLotes = []; DB.slotsLivres = [];
       DB.mapeamentos = {}; DB.meta = {}; DB.ultimaConferenciaNF = null;
       renderDados();
     });
@@ -1053,13 +1130,13 @@
     try {
       const wb = await readWorkbook(file);
       const defaultSelected = sourceKey === 'vendas' ? wb.sheetNames : [wb.sheetNames[0]];
-      renderMappingUI(sourceKey, wb, defaultSelected);
+      renderMappingUI(sourceKey, wb, defaultSelected, file.name);
     } catch (err) {
       area.innerHTML = `<div class="text-sm text-rose-600 mt-2">Erro ao ler o arquivo: ${escapeHtml(err.message)}</div>`;
     }
   }
 
-  function renderMappingUI(sourceKey, wb, selectedSheets) {
+  function renderMappingUI(sourceKey, wb, selectedSheets, fileName) {
     const area = $(`[data-mapping-area="${sourceKey}"]`);
     const groups = groupSheetsBySignature(wb.sheets, selectedSheets);
     const totalLinhas = selectedSheets.reduce((s, n) => s + wb.sheets[n].rows.length, 0);
@@ -1084,7 +1161,7 @@
     $$('input[data-sheet-toggle]', area).forEach((cb) => {
       cb.addEventListener('change', () => {
         const novaSelecao = $$('input[data-sheet-toggle]', area).filter((c) => c.checked).map((c) => c.dataset.sheetToggle);
-        renderMappingUI(sourceKey, wb, novaSelecao);
+        renderMappingUI(sourceKey, wb, novaSelecao, fileName);
       });
     });
 
@@ -1153,8 +1230,19 @@
       } else if (sourceKey === 'vendas') {
         const rowsPorGrupo = mapeamentosPorGrupo.map(({ grupo, mapa }) =>
           grupo.sheetNames.flatMap((name) => aplicarMapeamentoVendas(wb.sheets[name].rows, mapa)));
-        DB.vendas = agregarVendas(rowsPorGrupo);
-        DB.meta.vendasPeriodo = calcularPeriodoVendas(rowsPorGrupo);
+        const agregadoLote = agregarVendas(rowsPorGrupo);
+        const porCodigo = {};
+        agregadoLote.forEach((v) => { porCodigo[v.codigo] = v.qtd3m; });
+        // cada arquivo importado entra como um novo lote e é SOMADO aos
+        // que já estavam carregados — assim dá pra ir juntando os meses
+        // conforme forem sendo exportados do sistema.
+        DB.vendasLotes.push({
+          id: uid(),
+          nomeArquivo: fileName || 'arquivo sem nome',
+          importadoEm: Date.now(),
+          periodo: calcularPeriodoVendas(rowsPorGrupo),
+          porCodigo,
+        });
       }
 
       mapeamentosPorGrupo.forEach(({ grupo, mapa }) => { DB.mapeamentos[grupo.sig] = mapa; });

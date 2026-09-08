@@ -59,9 +59,16 @@ e cruza com o índice mestre.
   Se não houver livre, usa um endereço hoje ocupado por um SKU com saldo
   zerado (Físico e Disponível = 0) — na conferência de NF, só considera
   "zerado liberável" o SKU que **não** veio na nota atual.
-- **Período das vendas**: se a coluna de data for mapeada, o app calcula o
-  intervalo real dos dados carregados e avisa se for bem menor que ~3 meses
-  (sinal comum de exportação cortada no limite de linhas da planilha).
+- **Importação de vendas em lotes**: cada arquivo de vendas importado entra
+  como um lote separado e é **somado** aos lotes já carregados (não
+  substitui) — assim você pode ir importando mês a mês conforme for
+  exportando do sistema, sem perder o que já tinha subido antes. Cada lote
+  aparece listado em Dados (arquivo, período, SKUs, unidades) com botão
+  para remover, caso importe um mês errado ou duplicado.
+- **Período das vendas**: com a coluna de data mapeada, o app calcula o
+  intervalo coberto pela soma de todos os lotes e avisa se for bem menor
+  que ~3 meses (sinal comum de exportação cortada no limite de linhas da
+  planilha, ou de faltar importar mais algum mês).
 - **Números/valores**: qualquer valor nulo, vazio ou não numérico é tratado
   como `0` (nunca quebra a tela com erro). Números em formato BR
   (`1.234,56`, `R$ 1.234,56`) e em formato com ponto decimal (`0.01`) são
