@@ -1,5 +1,5 @@
 /* =========================================================================
-   Separação Inteligente — motor de dados e UI
+   Linha de Separação Inteligente — motor de dados e UI
    App 100% client-side (sem backend). Lê planilhas cruas (Vendas,
    Endereçamento e Saldo de Estoque) e XMLs de NF-e direto no navegador,
    cruza tudo por código de material e devolve recomendações de

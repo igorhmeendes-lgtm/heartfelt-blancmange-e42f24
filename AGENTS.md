@@ -7,7 +7,7 @@ backend, banco de dados, autenticação ou etapa de compilação compartilhada:
 
 1. `public/index.html` — landing page do Vision Prime (produto de
    suplemento). Público-alvo: visitantes/compradores.
-2. `public/separacao/` — app "Separação Inteligente", uma ferramenta interna
+2. `public/separacao/` — app "Linha de Separação Inteligente", uma ferramenta interna
    de logística (calibragem de linha de separação por giro de vendas,
    consulta de endereçamento, conferência de NF-e). Ver
    `public/separacao/README.md` para arquitetura e regras de negócio

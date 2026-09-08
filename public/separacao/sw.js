@@ -1,4 +1,4 @@
-/* Service worker do app "Separação Inteligente".
+/* Service worker do app "Linha de Separação Inteligente".
    Guarda o shell do app (HTML/JS/manifest/ícones) para abrir instalado e
    offline. As bibliotecas externas (Tailwind CDN, fontes, SheetJS) seguem
    direto pra rede — só precisam do primeiro carregamento com internet. */

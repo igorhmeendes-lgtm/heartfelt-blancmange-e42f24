@@ -30,7 +30,7 @@ npx serve public
 
 A Netlify publica diretamente o conteúdo da pasta `public`. Mudanças enviadas ao projeto entram no fluxo normal de deploy da plataforma.
 
-## Separação Inteligente (app de linha de separação)
+## Linha de Separação Inteligente (app de linha de separação)
 
 Além da landing page, `public/separacao/` hospeda um segundo app estático,
 independente do Vision Prime: uma ferramenta para calibrar a linha de

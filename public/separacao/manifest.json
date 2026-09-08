@@ -1,6 +1,6 @@
 {
-  "name": "Separação Inteligente",
-  "short_name": "Separação",
+  "name": "Linha de Separação Inteligente",
+  "short_name": "Linha Separação",
   "description": "Calibragem da linha de separação por giro de vendas, consulta de endereçamento e conferência de NF-e.",
   "start_url": "./index.html",
   "scope": "./",

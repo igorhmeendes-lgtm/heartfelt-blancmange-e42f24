@@ -1,4 +1,4 @@
-# Separação Inteligente
+# Linha de Separação Inteligente
 
 App client-side (PWA) para calibrar a linha de separação de um armazém
 conforme o giro de vendas dos últimos 3 meses. Roda em `/separacao/` deste
