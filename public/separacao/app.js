@@ -157,6 +157,11 @@
     mapeamentos: Store.get('mapeamentos', {}), // assinatura de cabeçalho -> mapeamento salvo
     meta: Store.get('meta', {}),           // {estoqueAt, enderecoAt, vendasAt}
     ultimaConferenciaNF: Store.get('ultimaConferenciaNF', null),
+    // Conexão opcional com Google Sheets (ver seção 4.1) — guarda só o
+    // link/ID da planilha e o nome de cada aba, nunca dados sensíveis.
+    googleSheet: Store.get('googleSheet', {
+      sheetId: '', abas: { estoque: 'Saldo Estoque', endereco: 'Emdereçamento', vendas: 'Vendas' }, ultimaSincronizacao: null,
+    }),
   };
 
   function persist() {
@@ -167,6 +172,7 @@
     Store.set('mapeamentos', DB.mapeamentos);
     Store.set('meta', DB.meta);
     Store.set('ultimaConferenciaNF', DB.ultimaConferenciaNF);
+    Store.set('googleSheet', DB.googleSheet);
   }
 
   // Soma todos os lotes de vendas já importados, código por código.
@@ -261,6 +267,46 @@
       reader.onerror = () => reject(reader.error || new Error('Falha ao ler o arquivo'));
       reader.readAsArrayBuffer(file);
     });
+  }
+
+  /* ---- 4.1) Google Sheets como fonte de dados (alternativa ao upload) ----
+     Lê a planilha direto do navegador, via CSV público do Google (sem
+     backend, sem credencial guardada) — precisa estar compartilhada como
+     "Qualquer pessoa com o link → Leitor". Só funciona em página normal
+     (http/https); não funciona dentro de uma pré-visualização em sandbox. */
+
+  function extrairIdDoLink(linkOuId) {
+    const s = String(linkOuId || '').trim();
+    const m = s.match(/\/d\/([a-zA-Z0-9_-]+)/);
+    return m ? m[1] : s;
+  }
+
+  function csvUrlDoGoogleSheet(sheetId, aba) {
+    return `https://docs.google.com/spreadsheets/d/${encodeURIComponent(sheetId)}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(aba)}`;
+  }
+
+  async function buscarAbaGoogleSheets(sheetId, aba) {
+    let res;
+    try {
+      res = await fetch(csvUrlDoGoogleSheet(sheetId, aba));
+    } catch (err) {
+      throw new Error('Não consegui conectar ao Google Sheets (rede/CORS). Confira sua internet e se a planilha está compartilhada como "Qualquer pessoa com o link → Leitor".');
+    }
+    if (!res.ok) {
+      throw new Error(`Não encontrei a aba "${aba}" (HTTP ${res.status}). Confira o link/ID da planilha, o nome exato da aba e o compartilhamento.`);
+    }
+    const text = await res.text();
+    if (/^\s*<(!doctype|html)/i.test(text) || /accounts\.google\.com/i.test(text)) {
+      throw new Error('A planilha não parece estar pública. Compartilhe como "Qualquer pessoa com o link → Leitor" e tente de novo.');
+    }
+    const wb = XLSX.read(text, { type: 'string' });
+    const nomeInterno = wb.SheetNames[0];
+    const ws = wb.Sheets[nomeInterno];
+    const rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
+    const headers = rows.length
+      ? Object.keys(rows[0])
+      : (XLSX.utils.sheet_to_json(ws, { header: 1 })[0] || []);
+    return { sheetNames: [aba], sheets: { [aba]: { headers, rows } } };
   }
 
   function headerSignature(headers) {
@@ -376,6 +422,72 @@
       quantidade: parseNumberBR(r[map.quantidade]),
       data: map.data ? parseDateBR(r[map.data]) : null,
     })).filter((r) => r.codigo);
+  }
+
+  // Aplica o mapeamento de colunas já confirmado e grava em DB — usado
+  // tanto pelo clique em "Processar dados" (upload manual) quanto pela
+  // atualização automática via Google Sheets, quando o layout já é
+  // conhecido (mesma assinatura de cabeçalho de uma vez anterior).
+  function aplicarMapeamento(sourceKey, wb, mapeamentosPorGrupo, fileName) {
+    if (sourceKey === 'estoque') {
+      const rows = mapeamentosPorGrupo.flatMap(({ grupo, mapa }) =>
+        grupo.sheetNames.flatMap((name) => aplicarMapeamentoEstoque(wb.sheets[name].rows, mapa)));
+      DB.estoque = rows;
+    } else if (sourceKey === 'endereco') {
+      const todasLinhas = mapeamentosPorGrupo.flatMap(({ grupo, mapa }) =>
+        grupo.sheetNames.flatMap((name) => aplicarMapeamentoEndereco(wb.sheets[name].rows, mapa)));
+      // linhas com código = posição ocupada; sem código = posição vaga
+      // (muitas planilhas de endereçamento já listam essas posições).
+      const ocupadas = todasLinhas.filter((r) => r.codigo);
+      const livresDaPlanilha = todasLinhas.filter((r) => !r.codigo).map((r) => r.enderecoCompleto);
+      DB.endereco = ocupadas;
+      const ocupadosSet = new Set(ocupadas.map((r) => r.enderecoCompleto));
+      const livresSet = new Set([...DB.slotsLivres, ...livresDaPlanilha]);
+      ocupadosSet.forEach((e) => livresSet.delete(e)); // se voltou a ser ocupada, sai da lista de livres
+      DB.slotsLivres = Array.from(livresSet);
+      const contagemPorCodigo = new Map();
+      ocupadas.forEach((r) => contagemPorCodigo.set(r.codigo, (contagemPorCodigo.get(r.codigo) || 0) + 1));
+      DB.meta.enderecoDuplicados = Array.from(contagemPorCodigo.values()).filter((v) => v > 1).length;
+      DB.meta.enderecoLivresDetectados = livresDaPlanilha.length;
+    } else if (sourceKey === 'vendas') {
+      const rowsPorGrupo = mapeamentosPorGrupo.map(({ grupo, mapa }) =>
+        grupo.sheetNames.flatMap((name) => aplicarMapeamentoVendas(wb.sheets[name].rows, mapa)));
+      const agregadoLote = agregarVendas(rowsPorGrupo);
+      const porCodigo = {};
+      agregadoLote.forEach((v) => { porCodigo[v.codigo] = v.qtd3m; });
+      // Um arquivo enviado manualmente é um lote novo (soma aos anteriores,
+      // mês a mês). Já uma aba viva do Google Sheets é sempre a MESMA
+      // fonte sendo atualizada — por isso usa um id fixo e substitui a
+      // versão anterior dela, em vez de acumular a cada clique.
+      const isGoogleSheets = String(fileName || '').startsWith('Google Sheets');
+      const idLote = isGoogleSheets ? 'googlesheets-live' : uid();
+      if (isGoogleSheets) DB.vendasLotes = DB.vendasLotes.filter((l) => l.id !== idLote);
+      DB.vendasLotes.push({
+        id: idLote,
+        nomeArquivo: fileName || 'arquivo sem nome',
+        importadoEm: Date.now(),
+        periodo: calcularPeriodoVendas(rowsPorGrupo),
+        porCodigo,
+      });
+    }
+    mapeamentosPorGrupo.forEach(({ grupo, mapa }) => { DB.mapeamentos[grupo.sig] = mapa; });
+    DB.meta[sourceKey + 'At'] = Date.now();
+  }
+
+  // Se já existe um mapeamento salvo pra esse exato layout de cabeçalho,
+  // aplica direto sem pedir nada — é o que faz a atualização do Google
+  // Sheets "já reconhecer" os dados sozinha da segunda vez em diante.
+  function tentarAutoProcessar(sourceKey, wb, sheetName, fileName) {
+    const headers = wb.sheets[sheetName].headers;
+    const sig = headerSignature(headers);
+    const mapa = DB.mapeamentos[sig];
+    if (!mapa) return false;
+    const ok = REQUIRED_FIELDS[sourceKey].every((f) => mapa[f] && headers.includes(mapa[f]));
+    if (!ok) return false;
+    const grupo = { sig, headers, sheetNames: [sheetName] };
+    aplicarMapeamento(sourceKey, wb, [{ grupo, mapa }], fileName);
+    persist();
+    return true;
   }
 
   // Curva ABC por volume: Alto = até 80% do volume acumulado (alto fluxo,
@@ -1007,7 +1119,37 @@
       <div class="space-y-6">
         <div>
           <h1 class="text-xl font-semibold text-slate-900 dark:text-slate-100">Dados</h1>
-          <p class="text-sm text-slate-500 dark:text-slate-400">Importe as planilhas cruas exportadas do sistema (.xlsx, .xls ou .csv). Tudo é processado no seu aparelho — nada é enviado a nenhum servidor.</p>
+          <p class="text-sm text-slate-500 dark:text-slate-400">Importe as planilhas cruas exportadas do sistema (.xlsx, .xls ou .csv), ou conecte direto um Google Sheets abaixo. Tudo é processado no seu aparelho — nada é enviado a nenhum servidor nosso.</p>
+        </div>
+
+        <div class="rounded-2xl border border-indigo-200 dark:border-indigo-500/30 bg-indigo-50/50 dark:bg-indigo-500/5 p-4 sm:p-5">
+          <div class="font-medium text-slate-900 dark:text-slate-100">🔗 Conectar Google Sheets</div>
+          <p class="text-xs text-slate-500 dark:text-slate-400 mt-1 mb-3">Mantenha as 3 planilhas num Google Sheets — compartilhado como <strong>"Qualquer pessoa com o link → Leitor"</strong> — e atualize aqui com 1 clique, sem baixar/subir arquivo. A primeira conexão pede pra confirmar as colunas (uma vez só); depois disso é só clicar em atualizar.</p>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div class="sm:col-span-3">
+              <label class="text-xs text-slate-500 dark:text-slate-400">Link ou ID da planilha</label>
+              <input id="gs-sheet-id" type="text" value="${escapeHtml(DB.googleSheet.sheetId)}" placeholder="https://docs.google.com/spreadsheets/d/..." class="mt-1 w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm px-2 py-1.5 font-mono">
+            </div>
+            <div>
+              <label class="text-xs text-slate-500 dark:text-slate-400">Aba — Saldo de Estoque</label>
+              <input id="gs-aba-estoque" type="text" value="${escapeHtml(DB.googleSheet.abas.estoque)}" class="mt-1 w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm px-2 py-1.5">
+            </div>
+            <div>
+              <label class="text-xs text-slate-500 dark:text-slate-400">Aba — Endereçamento</label>
+              <input id="gs-aba-endereco" type="text" value="${escapeHtml(DB.googleSheet.abas.endereco)}" class="mt-1 w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm px-2 py-1.5">
+            </div>
+            <div>
+              <label class="text-xs text-slate-500 dark:text-slate-400">Aba — Vendas</label>
+              <input id="gs-aba-vendas" type="text" value="${escapeHtml(DB.googleSheet.abas.vendas)}" class="mt-1 w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm px-2 py-1.5">
+            </div>
+          </div>
+          <div class="mt-3 flex items-center gap-3 flex-wrap">
+            <button data-action="gs-conectar" class="px-4 py-2 rounded-xl text-sm font-medium bg-indigo-600 hover:bg-indigo-500 text-white">
+              ${DB.googleSheet.ultimaSincronizacao ? '🔄 Atualizar do Google Sheets' : '🔗 Conectar'}
+            </button>
+            ${DB.googleSheet.ultimaSincronizacao ? `<span class="text-xs text-slate-400">Última atualização: ${new Date(DB.googleSheet.ultimaSincronizacao).toLocaleString('pt-BR')}</span>` : ''}
+          </div>
+          <div id="gs-status" class="mt-2 text-xs space-y-1"></div>
         </div>
 
         ${sources.map((s) => `
@@ -1117,10 +1259,57 @@
 
     $('[data-action="reset-app"]', el).addEventListener('click', () => {
       if (!confirm('Isso vai apagar todos os dados importados neste aparelho. Continuar?')) return;
-      ['estoque', 'endereco', 'vendasLotes', 'slotsLivres', 'mapeamentos', 'meta', 'ultimaConferenciaNF'].forEach((k) => Store.remove(k));
+      ['estoque', 'endereco', 'vendasLotes', 'slotsLivres', 'mapeamentos', 'meta', 'ultimaConferenciaNF', 'googleSheet'].forEach((k) => Store.remove(k));
       DB.estoque = []; DB.endereco = []; DB.vendasLotes = []; DB.slotsLivres = [];
       DB.mapeamentos = {}; DB.meta = {}; DB.ultimaConferenciaNF = null;
+      DB.googleSheet = { sheetId: '', abas: { estoque: 'Saldo Estoque', endereco: 'Emdereçamento', vendas: 'Vendas' }, ultimaSincronizacao: null };
       renderDados();
+    });
+
+    $('[data-action="gs-conectar"]', el).addEventListener('click', async () => {
+      const btn = $('[data-action="gs-conectar"]', el);
+      const status = $('#gs-status', el);
+      const sheetIdRaw = $('#gs-sheet-id', el).value.trim();
+      const abas = {
+        estoque: $('#gs-aba-estoque', el).value.trim(),
+        endereco: $('#gs-aba-endereco', el).value.trim(),
+        vendas: $('#gs-aba-vendas', el).value.trim(),
+      };
+      if (!sheetIdRaw || !abas.estoque || !abas.endereco || !abas.vendas) {
+        status.innerHTML = '<div class="text-rose-600 dark:text-rose-400">Preencha o link/ID da planilha e o nome das 3 abas.</div>';
+        return;
+      }
+      const sheetId = extrairIdDoLink(sheetIdRaw);
+      DB.googleSheet.sheetId = sheetIdRaw;
+      DB.googleSheet.abas = abas;
+      btn.disabled = true;
+      const textoOriginal = btn.textContent;
+      btn.textContent = 'Conectando...';
+      const linhasStatus = [];
+      let precisaMapear = false;
+      const fontes = [['estoque', 'Saldo de Estoque'], ['endereco', 'Endereçamento'], ['vendas', 'Vendas']];
+      for (const [sourceKey, label] of fontes) {
+        try {
+          const wb = await buscarAbaGoogleSheets(sheetId, abas[sourceKey]);
+          const nomeFonte = `Google Sheets — ${abas[sourceKey]}`;
+          const autoOk = tentarAutoProcessar(sourceKey, wb, abas[sourceKey], nomeFonte);
+          if (autoOk) {
+            linhasStatus.push(`✅ ${label}: atualizado (${wb.sheets[abas[sourceKey]].rows.length} linhas)`);
+          } else {
+            linhasStatus.push(`⚠️ ${label}: confirme o mapeamento de colunas abaixo (só na primeira vez)`);
+            precisaMapear = true;
+            renderMappingUI(sourceKey, wb, [abas[sourceKey]], nomeFonte);
+          }
+        } catch (err) {
+          linhasStatus.push(`❌ ${label}: ${err.message}`);
+        }
+      }
+      DB.googleSheet.ultimaSincronizacao = Date.now();
+      persist();
+      status.innerHTML = linhasStatus.map((l) => `<div>${escapeHtml(l)}</div>`).join('');
+      btn.disabled = false;
+      btn.textContent = textoOriginal;
+      if (!precisaMapear) renderDados();
     });
   }
 
@@ -1207,46 +1396,7 @@
       if (erro) { feedback.textContent = erro; return; }
       feedback.textContent = '';
 
-      if (sourceKey === 'estoque') {
-        const rows = mapeamentosPorGrupo.flatMap(({ grupo, mapa }) =>
-          grupo.sheetNames.flatMap((name) => aplicarMapeamentoEstoque(wb.sheets[name].rows, mapa)));
-        DB.estoque = rows;
-      } else if (sourceKey === 'endereco') {
-        const todasLinhas = mapeamentosPorGrupo.flatMap(({ grupo, mapa }) =>
-          grupo.sheetNames.flatMap((name) => aplicarMapeamentoEndereco(wb.sheets[name].rows, mapa)));
-        // linhas com código = posição ocupada; sem código = posição vaga
-        // (muitas planilhas de endereçamento já listam essas posições).
-        const ocupadas = todasLinhas.filter((r) => r.codigo);
-        const livresDaPlanilha = todasLinhas.filter((r) => !r.codigo).map((r) => r.enderecoCompleto);
-        DB.endereco = ocupadas;
-        const ocupadosSet = new Set(ocupadas.map((r) => r.enderecoCompleto));
-        const livresSet = new Set([...DB.slotsLivres, ...livresDaPlanilha]);
-        ocupadosSet.forEach((e) => livresSet.delete(e)); // se voltou a ser ocupada, sai da lista de livres
-        DB.slotsLivres = Array.from(livresSet);
-        const contagemPorCodigo = new Map();
-        ocupadas.forEach((r) => contagemPorCodigo.set(r.codigo, (contagemPorCodigo.get(r.codigo) || 0) + 1));
-        DB.meta.enderecoDuplicados = Array.from(contagemPorCodigo.values()).filter((v) => v > 1).length;
-        DB.meta.enderecoLivresDetectados = livresDaPlanilha.length;
-      } else if (sourceKey === 'vendas') {
-        const rowsPorGrupo = mapeamentosPorGrupo.map(({ grupo, mapa }) =>
-          grupo.sheetNames.flatMap((name) => aplicarMapeamentoVendas(wb.sheets[name].rows, mapa)));
-        const agregadoLote = agregarVendas(rowsPorGrupo);
-        const porCodigo = {};
-        agregadoLote.forEach((v) => { porCodigo[v.codigo] = v.qtd3m; });
-        // cada arquivo importado entra como um novo lote e é SOMADO aos
-        // que já estavam carregados — assim dá pra ir juntando os meses
-        // conforme forem sendo exportados do sistema.
-        DB.vendasLotes.push({
-          id: uid(),
-          nomeArquivo: fileName || 'arquivo sem nome',
-          importadoEm: Date.now(),
-          periodo: calcularPeriodoVendas(rowsPorGrupo),
-          porCodigo,
-        });
-      }
-
-      mapeamentosPorGrupo.forEach(({ grupo, mapa }) => { DB.mapeamentos[grupo.sig] = mapa; });
-      DB.meta[sourceKey + 'At'] = Date.now();
+      aplicarMapeamento(sourceKey, wb, mapeamentosPorGrupo, fileName);
       persist();
       renderDados();
     });

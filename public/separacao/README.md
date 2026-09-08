@@ -75,6 +75,42 @@ e cruza com o índice mestre.
   reconhecidos. Saldo negativo real (backorder) é preservado — não é
   zerado, porque é sinal de um problema real de estoque.
 
+## Conectar Google Sheets (em vez de subir arquivo toda vez)
+
+Na aba **Dados** há um bloco "🔗 Conectar Google Sheets": em vez de baixar
+o export e subir o arquivo, você mantém as 3 planilhas (Vendas,
+Endereçamento, Saldo de Estoque) como abas de um Google Sheets e o app lê
+direto de lá.
+
+- **Requisito**: a planilha precisa estar compartilhada como
+  *"Qualquer pessoa com o link → Leitor"* (Arquivo → Compartilhar). O app
+  lê o CSV público de cada aba direto do navegador do usuário — continua
+  sem backend nosso no meio, é uma conexão direta navegador → Google.
+- Cole o link (ou o ID) da planilha e o **nome exato de cada aba**;
+  clique em **Conectar**.
+- Na primeira conexão, cada aba pede pra confirmar o mapeamento de
+  colunas (igual ao upload manual) — só uma vez. Nas próximas vezes,
+  clicar em **Atualizar do Google Sheets** já reconhece o mesmo layout e
+  processa direto, sem perguntar nada.
+- A aba de Vendas conectada por Sheets é tratada como uma fonte "viva":
+  cada atualização **substitui** a leitura anterior dela (não soma), já
+  que é a mesma planilha sendo atualizada — diferente do upload manual de
+  arquivo, que soma um lote novo por mês. As duas formas podem coexistir
+  (ex.: meses antigos por arquivo + o mês atual vivo por Sheets).
+- **Não funciona dentro do link de pré-visualização do Claude** (o
+  ambiente do Artifact bloqueia conexão com sites externos por segurança) —
+  só funciona quando o app está publicado num site de verdade (ex.:
+  Netlify), que é como ele roda em produção.
+
+### Por que não SQL direto?
+
+Puxar de um banco SQL exigiria um backend intermediário (o navegador não
+conversa direto com um banco de dados, e expor credenciais de banco num
+site público seria um risco de segurança) — algo bem maior do que este
+app cliente-only hoje. Se no futuro fizer sentido, o caminho mais simples
+seria uma planilha (Google Sheets) alimentada automaticamente pelo seu
+sistema/banco, mantendo este app como está.
+
 ## Guia de implementação / deploy
 
 1. Este app não precisa de build. A Netlify já publica `public/` — então
