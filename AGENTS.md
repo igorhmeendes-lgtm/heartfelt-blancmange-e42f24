@@ -2,7 +2,17 @@
 
 ## Visão geral
 
-Este projeto contém uma landing page estática do Vision Prime hospedada na Netlify. A página não possui backend, banco de dados, autenticação ou etapa de compilação.
+Este repositório hospeda dois sites estáticos independentes na Netlify, sem
+backend, banco de dados, autenticação ou etapa de compilação compartilhada:
+
+1. `public/index.html` — landing page do Vision Prime (produto de
+   suplemento). Público-alvo: visitantes/compradores.
+2. `public/separacao/` — app "Linha de Separação Inteligente", uma ferramenta interna
+   de logística (calibragem de linha de separação por giro de vendas,
+   consulta de endereçamento, conferência de NF-e). Ver
+   `public/separacao/README.md` para arquitetura e regras de negócio
+   específicas. **Não misture conteúdo dos dois**: a landing page não deve
+   linkar nem referenciar o app de logística, e vice-versa.
 
 ## Arquitetura
 
@@ -10,6 +20,8 @@ Este projeto contém uma landing page estática do Vision Prime hospedada na Net
 - O Tailwind CSS é carregado por CDN e usado diretamente nas classes HTML.
 - As imagens principais estão incorporadas como data URIs para manter a publicação autocontida.
 - `netlify.toml` define `public` como diretório publicado e adiciona cabeçalhos HTTP.
+- `public/separacao/` é um PWA separado (`manifest.json` + `sw.js` próprios,
+  escopo `./` dentro da pasta) — cada app cuida do próprio cache/instalação.
 
 ## Convenções
 

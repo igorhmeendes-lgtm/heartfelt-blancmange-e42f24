@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Linha de Separação Inteligente | Calibragem de linha por giro de vendas</title>
+<meta name="description" content="Calibre a linha de separação conforme o giro de vendas: consulte código de produto, encontre oportunidades de relocação par/ímpar e confira NF-e de entrada.">
+<meta name="theme-color" content="#0f172a">
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" href="./icons/icon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="./icons/icon-apple-touch-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Linha Separação">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config = { darkMode: 'class' };</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  html, body { font-family: 'Inter', sans-serif; }
+  .font-mono { font-family: 'IBM Plex Mono', monospace; }
+  body { background: #f8fafc; color: #0f172a; }
+  html.dark body { background: #0b1120; color: #e2e8f0; }
+  .tab-btn { color: #64748b; }
+  .tab-btn.tab-active { color: #4f46e5; }
+  html.dark .tab-btn { color: #94a3b8; }
+  html.dark .tab-btn.tab-active { color: #a5b4fc; }
+  ::-webkit-scrollbar { height: 8px; width: 8px; }
+  ::-webkit-scrollbar-thumb { background: rgba(100,116,139,.35); border-radius: 8px; }
+</style>
+</head>
+<body class="min-h-screen">
+
+  <div class="flex min-h-screen">
+    <!-- Sidebar (desktop/tablet) -->
+    <aside class="hidden md:flex md:w-60 flex-col border-r border-slate-200 dark:border-slate-800 p-4 sticky top-0 h-screen">
+      <div class="flex items-center gap-2 px-2 mb-6">
+        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-400 to-indigo-600 flex items-center justify-center text-white font-bold text-sm shrink-0">S</div>
+        <div>
+          <div class="font-semibold text-slate-900 dark:text-slate-100 leading-tight">Linha de Separação</div>
+          <div class="text-[11px] text-slate-400 leading-tight">Inteligente</div>
+        </div>
+      </div>
+      <nav class="flex flex-col gap-1">
+        <button data-tab="inicio" class="tab-btn flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium hover:bg-slate-100 dark:hover:bg-slate-800/60 text-left">
+          <span aria-hidden="true">🏠</span> Início
+        </button>
+        <button data-tab="consulta" class="tab-btn flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium hover:bg-slate-100 dark:hover:bg-slate-800/60 text-left">
+          <span aria-hidden="true">🔎</span> Consulta
+        </button>
+        <button data-tab="relocacao" class="tab-btn flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium hover:bg-slate-100 dark:hover:bg-slate-800/60 text-left">
+          <span aria-hidden="true">🔁</span> Relocação
+        </button>
+        <button data-tab="nf" class="tab-btn flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium hover:bg-slate-100 dark:hover:bg-slate-800/60 text-left">
+          <span aria-hidden="true">📄</span> Conferência NF
+        </button>
+        <button data-tab="dados" class="tab-btn flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium hover:bg-slate-100 dark:hover:bg-slate-800/60 text-left">
+          <span aria-hidden="true">🗂️</span> Dados
+        </button>
+      </nav>
+      <div class="mt-auto px-2">
+        <button id="toggle-dark" class="w-9 h-9 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center">🌙</button>
+      </div>
+    </aside>
+
+    <!-- Conteúdo principal -->
+    <div class="flex-1 flex flex-col min-w-0">
+      <header class="md:hidden sticky top-0 z-10 bg-white/90 dark:bg-slate-950/90 backdrop-blur border-b border-slate-200 dark:border-slate-800 px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <div class="w-7 h-7 rounded-lg bg-gradient-to-br from-cyan-400 to-indigo-600 flex items-center justify-center text-white font-bold text-xs shrink-0">S</div>
+          <span class="font-semibold text-slate-900 dark:text-slate-100 text-sm leading-tight">Linha de Separação Inteligente</span>
+        </div>
+        <button id="toggle-dark-mobile" onclick="document.getElementById('toggle-dark').click()" class="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-sm">🌙</button>
+      </header>
+
+      <main class="flex-1 p-4 sm:p-6 lg:p-8 pb-24 md:pb-8 max-w-5xl w-full mx-auto">
+        <section data-view="inicio" class="view"></section>
+        <section data-view="consulta" class="view hidden"></section>
+        <section data-view="relocacao" class="view hidden"></section>
+        <section data-view="nf" class="view hidden"></section>
+        <section data-view="dados" class="view hidden"></section>
+      </main>
+    </div>
+  </div>
+
+  <!-- Bottom nav (mobile) -->
+  <nav class="md:hidden fixed bottom-0 inset-x-0 bg-white/95 dark:bg-slate-950/95 backdrop-blur border-t border-slate-200 dark:border-slate-800 flex justify-around py-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom))] z-20">
+    <button data-tab="inicio" class="tab-btn flex flex-col items-center gap-0.5 px-3 py-1.5 text-[11px] font-medium">
+      <span class="text-lg leading-none" aria-hidden="true">🏠</span> Início
+    </button>
+    <button data-tab="consulta" class="tab-btn flex flex-col items-center gap-0.5 px-3 py-1.5 text-[11px] font-medium">
+      <span class="text-lg leading-none" aria-hidden="true">🔎</span> Consulta
+    </button>
+    <button data-tab="relocacao" class="tab-btn flex flex-col items-center gap-0.5 px-3 py-1.5 text-[11px] font-medium">
+      <span class="text-lg leading-none" aria-hidden="true">🔁</span> Reloc.
+    </button>
+    <button data-tab="nf" class="tab-btn flex flex-col items-center gap-0.5 px-3 py-1.5 text-[11px] font-medium">
+      <span class="text-lg leading-none" aria-hidden="true">📄</span> NF
+    </button>
+    <button data-tab="dados" class="tab-btn flex flex-col items-center gap-0.5 px-3 py-1.5 text-[11px] font-medium">
+      <span class="text-lg leading-none" aria-hidden="true">🗂️</span> Dados
+    </button>
+  </nav>
+
+  <script src="./app.js"></script>
+</body>
+</html>
