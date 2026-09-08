@@ -1110,10 +1110,20 @@
     const totalVendasSKUs = vendasAgregadas().length;
     const periodoGlobal = vendasPeriodoGlobal();
     const fmtData = (iso) => new Date(iso).toLocaleDateString('pt-BR');
-    const periodoGlobalInfo = periodoGlobal ? `
-      <div class="mt-2 text-xs ${periodoGlobal.dias < 80 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-400'}">
-        Período total coberto pelos lotes: ${fmtData(periodoGlobal.min)} a ${fmtData(periodoGlobal.max)} (${periodoGlobal.dias} dias)${periodoGlobal.dias < 80 ? ' ⚠️ menos que ~3 meses — importe mais lotes ou confira se algum export veio cortado.' : ''}
-      </div>` : '';
+    let periodoGlobalInfo = '';
+    if (periodoGlobal) {
+      const curto = periodoGlobal.dias < 80;
+      const longo = periodoGlobal.dias > 110;
+      const aviso = curto
+        ? ' ⚠️ menos que ~3 meses — importe mais lotes ou confira se algum export veio cortado.'
+        : longo
+          ? ' ⚠️ mais que ~3 meses — a classificação de giro vai considerar esse período todo, não só o mais recente. Se quiser calibrar só pelos últimos 3 meses, filtre a planilha/lote antes de conectar.'
+          : '';
+      periodoGlobalInfo = `
+      <div class="mt-2 text-xs ${(curto || longo) ? 'text-amber-600 dark:text-amber-400' : 'text-slate-400'}">
+        Período total coberto pelos lotes: ${fmtData(periodoGlobal.min)} a ${fmtData(periodoGlobal.max)} (${periodoGlobal.dias} dias)${aviso}
+      </div>`;
+    }
 
     el.innerHTML = `
       <div class="space-y-6">
